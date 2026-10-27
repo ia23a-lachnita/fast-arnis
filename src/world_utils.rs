@@ -502,11 +502,17 @@ pub fn check_run_size(
             });
         }
     }
-    let needed = estimated_world_bytes(blocks_km2(args, bbox), format, WorldSizeOptions::of(args));
-    check_disk_space(dir, needed).map_err(|detail| RunSizeError {
-        area: false,
-        detail,
-    })
+    if !args.unlimited_area {
+        let mut needed = estimated_world_bytes(blocks_km2(args, bbox), format, WorldSizeOptions::of(args));
+        if args.swiss_border || args.polygon.is_some() {
+            needed = (needed as f64 * 0.54) as u64;
+        }
+        check_disk_space(dir, needed).map_err(|detail| RunSizeError {
+            area: false,
+            detail,
+        })?;
+    }
+    Ok(())
 }
 
 /// `check_run_size`'s disk check again, for a run whose terrain fit just extended the build

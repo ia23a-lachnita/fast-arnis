@@ -790,6 +790,9 @@ pub fn apply_body_defaults(args: &mut Args) {
     if (args.switzerland || args.swiss_border) && args.bbox.is_none() {
         args.bbox = Some(crate::coordinate_system::geographic::LLBBox::from_str("45.818,5.956,47.808,10.492").unwrap());
     }
+    if args.switzerland || args.swiss_border {
+        args.unlimited_area = true;
+    }
     apply_mode_defaults(args);
     if args.body.is_earth() {
         return;
