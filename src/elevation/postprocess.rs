@@ -75,14 +75,15 @@ pub fn repair_terrain_anomalies(heights: &mut [Vec<f64>], m_per_cell: f64) {
     let judge = |heights: &[Vec<f64>],
                  y: usize,
                  x: usize,
-                 (neighbors, abs_devs): &mut (Vec<f64>, Vec<f64>)|
+                 _scratch: &mut ()|
      -> Option<f64> {
         let center = heights[y][x];
         if !center.is_finite() {
             return None;
         }
 
-        neighbors.clear();
+        let mut neighbors = [0.0f64; 24];
+        let mut count = 0usize;
         let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
         for dy in -RADIUS..=RADIUS {
             for dx in -RADIUS..=RADIUS {
@@ -91,13 +92,14 @@ pub fn repair_terrain_anomalies(heights: &mut [Vec<f64>], m_per_cell: f64) {
                 }
                 let v = heights[(y as i32 + dy) as usize][(x as i32 + dx) as usize];
                 if v.is_finite() {
-                    neighbors.push(v);
+                    neighbors[count] = v;
+                    count += 1;
                     lo = lo.min(v);
                     hi = hi.max(v);
                 }
             }
         }
-        if neighbors.len() < 8 {
+        if count < 8 {
             return None;
         }
         // The median lies within the neighbours' range, so a centre within
@@ -107,20 +109,24 @@ pub fn repair_terrain_anomalies(heights: &mut [Vec<f64>], m_per_cell: f64) {
             return None;
         }
 
-        let mid = neighbors.len() / 2;
-        neighbors.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap());
-        let median = neighbors[mid];
+        let active = &mut neighbors[..count];
+        let mid = count / 2;
+        active.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap());
+        let median = active[mid];
 
-        abs_devs.clear();
-        abs_devs.extend(neighbors.iter().map(|&v| (v - median).abs()));
-        let mad_mid = abs_devs.len() / 2;
-        abs_devs.select_nth_unstable_by(mad_mid, |a, b| a.partial_cmp(b).unwrap());
-        let mad = abs_devs[mad_mid];
+        let mut abs_devs = [0.0f64; 24];
+        for i in 0..count {
+            abs_devs[i] = (active[i] - median).abs();
+        }
+        let active_devs = &mut abs_devs[..count];
+        let mad_mid = count / 2;
+        active_devs.select_nth_unstable_by(mad_mid, |a, b| a.partial_cmp(b).unwrap());
+        let mad = active_devs[mad_mid];
 
         let deviation = (center - median).abs();
         (deviation > abs_threshold && deviation > RELATIVE_FACTOR * mad.max(1.0)).then_some(median)
     };
-    let scratch = || (Vec::with_capacity(24), Vec::with_capacity(24));
+    let scratch = || ();
 
     let mut total_repaired = 0usize;
     let mut passes_ran = 0usize;

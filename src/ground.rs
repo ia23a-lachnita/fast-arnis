@@ -1062,6 +1062,20 @@ impl Ground {
         if let Some(h) = data.beyond(coord.x, coord.z) {
             return f64::from(h).round() as i32;
         }
+
+        // Fast-path: 1:1 grid alignment avoids ratio calculations & 4-point bilinear interpolation
+        if data.width == data.world_width && data.height == data.world_height {
+            let x = coord.x;
+            let z = coord.z;
+            if x >= 0 && z >= 0 {
+                let ux = x as usize;
+                let uz = z as usize;
+                if uz < data.height && ux < data.width {
+                    return (data.heights[uz][ux] as f64).round() as i32;
+                }
+            }
+        }
+
         let (x_ratio, z_ratio) = self.get_data_coordinates(coord, data);
         self.interpolate_height(x_ratio, z_ratio, data)
     }
@@ -1073,6 +1087,18 @@ impl Ground {
             Some(data) if self.elevation_enabled => {
                 if let Some(h) = data.beyond(coord.x, coord.z) {
                     return f64::from(h);
+                }
+                // Fast-path: 1:1 grid alignment avoids ratio calculations & 4-point bilinear interpolation
+                if data.width == data.world_width && data.height == data.world_height {
+                    let x = coord.x;
+                    let z = coord.z;
+                    if x >= 0 && z >= 0 {
+                        let ux = x as usize;
+                        let uz = z as usize;
+                        if uz < data.height && ux < data.width {
+                            return data.heights[uz][ux] as f64;
+                        }
+                    }
                 }
                 let (x_ratio, z_ratio) = self.get_data_coordinates(coord, data);
                 Self::interpolate_height_exact(x_ratio, z_ratio, data)
