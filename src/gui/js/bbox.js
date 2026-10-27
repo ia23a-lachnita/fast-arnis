@@ -1604,7 +1604,23 @@ $(document).ready(function () {
                 repeatMode: false
             },
             polyline: false,
-            polygon: false,
+            polygon: {
+                allowIntersection: false,
+                drawError: {
+                    color: '#e1e100',
+                    message: 'Shape edges cannot overlap!'
+                },
+                shapeOptions: {
+                    color: '#fecc44',
+                    opacity: 0.8,
+                    weight: 3,
+                    fillColor: '#fecc44',
+                    fillOpacity: 0.1,
+                    lineCap: 'round',
+                    lineJoin: 'round'
+                },
+                repeatMode: false
+            },
             circle: false,
             circlemarker: false,
             marker: {
@@ -2214,10 +2230,11 @@ $(document).ready(function () {
     map.on('draw:created', function (e) {
         // instanceof, not layerType: restore paths fire rectangles as "polygon"
         var isRectangle = e.layer instanceof L.Rectangle;
+        var isPolygon = (e.layer instanceof L.Polygon) && !isRectangle;
+        var isArea = isRectangle || isPolygon;
 
-        // The first area ever selected retires the hint for good. Recorded
-        // before the layer is added below, whose layeradd refreshes the outline.
-        if (isRectangle) {
+        // The first area ever selected retires the hint for good.
+        if (isArea) {
             markAreaToolLearned();
             var hint = document.querySelector('.bbox-hint-overlay');
             if (hint) hint.style.display = 'none';
@@ -2233,17 +2250,14 @@ $(document).ready(function () {
             });
         }
 
-        // If it's a rectangle, remove any existing rectangles first
-        if (isRectangle) {
+        // If it's an area (rectangle or polygon), remove previous areas
+        if (isArea) {
             drawnItems.eachLayer(function(layer) {
-                if (layer instanceof L.Rectangle) {
+                if (layer instanceof L.Polygon) {
                     drawnItems.removeLayer(layer);
                 }
             });
-        }
 
-        // Check if it's a rectangle and set proper styles before adding it to the layer
-        if (isRectangle) {
             e.layer.setStyle({
                 color: '#fecc44',
                 opacity: 1.0,
@@ -2253,6 +2267,16 @@ $(document).ready(function () {
                 lineCap: 'round',
                 lineJoin: 'round'
             });
+
+            if (isPolygon) {
+                var latLngs = e.layer.getLatLngs();
+                if (Array.isArray(latLngs[0])) latLngs = latLngs[0];
+                window.customPolygonCoords = latLngs.map(function(pt) {
+                    return pt.lat.toFixed(6) + ',' + pt.lng.toFixed(6);
+                }).join(';');
+            } else {
+                window.customPolygonCoords = null;
+            }
         }
 
         drawnItems.addLayer(e.layer);

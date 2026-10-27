@@ -1627,6 +1627,11 @@ fn gui_start_generation(
             let existing_tall = existing_java && crate::world_utils::has_tall_datapack(&world_path);
 
             // Create an Args instance with the chosen bounding box
+            let is_swiss = (bbox.min().lat() - 45.818).abs() < 0.2
+                && (bbox.max().lat() - 47.808).abs() < 0.2
+                && (bbox.min().lng() - 5.956).abs() < 0.2
+                && (bbox.max().lng() - 10.492).abs() < 0.2;
+
             // Note: path is used for Java-specific features like spawn point update
             let mut args: Args = Args {
                 bbox: Some(bbox),
@@ -1648,6 +1653,14 @@ fn gui_start_generation(
                 post_apocalyptic: post_apocalyptic_enabled,
                 winter: winter_enabled,
                 legacy_terrain: false,
+                hardware_info: false,
+                hardware_test: false,
+                switzerland: is_swiss,
+                polygon: None,
+                swiss_border: is_swiss,
+                threads: None,
+                ram_budget_percent: 75,
+                unlimited_area: true,
                 interior: interior_enabled,
                 fillground: fillground_enabled,
                 caves: caves_enabled,
