@@ -72,14 +72,14 @@ const MAX_TILE_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Ground the archive serves at world scale 1. A smaller scale builds the same blocks from more
 /// ground, so the limit grows with 1/scale², up to [`MAX_AREA_KM2`].
-const AREA_KM2_AT_SCALE_1: f64 = 25_000.0;
+/// Expanded in Fast-Arnis to 150,000 km² to support country-scale maps (e.g. Switzerland ~41,285 km²).
+const AREA_KM2_AT_SCALE_1: f64 = 150_000.0;
 
 /// Ground served at any scale: past this the OSM data alone outgrows memory.
-const MAX_AREA_KM2: f64 = 100_000.0;
+const MAX_AREA_KM2: f64 = 300_000.0;
 
-/// Guards against a bbox that would ask for the whole planet tile by tile. Tiles shrink toward
-/// the poles; this still holds the area limit up to about 75 degrees of latitude.
-const MAX_TILES: usize = 65_536;
+/// Guards against a bbox that would ask for the whole planet tile by tile.
+const MAX_TILES: usize = 262_144;
 
 /// Tiles fetched and decompressed at once.
 const TILE_BATCH: usize = 512;
@@ -1051,10 +1051,10 @@ mod tests {
 
     #[test]
     fn the_area_limit_grows_with_a_smaller_scale_up_to_the_cap() {
-        assert_eq!(max_area_km2(1.0), 25_000.0);
-        assert_eq!(max_area_km2(2.0), 6_250.0);
-        assert_eq!(max_area_km2(0.5), 100_000.0);
-        assert_eq!(max_area_km2(0.05), 100_000.0);
+        assert_eq!(max_area_km2(1.0), 150_000.0);
+        assert_eq!(max_area_km2(2.0), 37_500.0);
+        assert_eq!(max_area_km2(0.5), 300_000.0);
+        assert_eq!(max_area_km2(0.05), 300_000.0);
     }
 
     #[test]
@@ -1072,19 +1072,19 @@ mod tests {
 
     #[test]
     fn a_box_past_the_area_limit_is_refused_before_any_request() {
-        let Err(e) = read_tiles(square(50.0, 26_000.0), "http://127.0.0.1:9/v1", 25_000.0) else {
-            panic!("a 26,000 km² box was read at scale 1");
+        let Err(e) = read_tiles(square(50.0, 160_000.0), "http://127.0.0.1:9/v1", 150_000.0) else {
+            panic!("a 160,000 km² box was read at scale 1");
         };
-        assert!(e.starts_with("that area needs 2"), "{e}");
+        assert!(e.starts_with("that area needs 160"), "{e}");
     }
 
     #[test]
     fn the_size_check_follows_the_world_scale() {
         let b = square(65.5, 24_900.0);
         assert!(check_size(&b, 1.0).is_ok());
-        assert!(check_size(&b, 2.0).is_err());
-        assert!(check_size(&square(0.0, 99_000.0), 0.05).is_ok());
-        assert!(check_size(&square(0.0, 101_000.0), 0.05).is_err());
+        assert!(check_size(&b, 3.0).is_err());
+        assert!(check_size(&square(0.0, 299_000.0), 0.05).is_ok());
+        assert!(check_size(&square(0.0, 301_000.0), 0.05).is_err());
     }
 
     #[test]

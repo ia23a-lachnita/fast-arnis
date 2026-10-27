@@ -702,21 +702,33 @@ fn should_stream_to_disk() -> bool {
     std::env::var("ARNIS_STREAM_TO_DISK").ok().as_deref() != Some("0")
 }
 
-/// Caps concurrent tile editors (~2 regions each, region + halo) to 20% of free RAM.
-fn tile_processing_threads(pool_threads: usize, available_mb: u64, fillground: bool) -> usize {
+/// Caps concurrent tile editors (~2 regions each, region + halo) according to available RAM and streaming mode.
+pub fn tile_processing_threads_budgeted(
+    pool_threads: usize,
+    available_mb: u64,
+    fillground: bool,
+    budget_percent: u64,
+    streaming: bool,
+) -> usize {
     let pool_threads = pool_threads.max(1);
-    if available_mb == 0 {
+    if available_mb == 0 || streaming {
+        // When streaming to disk is active, regions are dynamically evicted as completed,
+        // so full hardware concurrency can be utilized safely.
         return pool_threads;
     }
 
-    const TILE_RAM_BUDGET_PERCENT: u64 = 20;
     const REGIONS_PER_TILE_ESTIMATE: u64 = 2;
     let per_tile_mb = crate::world_editor::per_region_estimate_mb(fillground)
         .max(1)
         .saturating_mul(REGIONS_PER_TILE_ESTIMATE);
-    let tile_budget_mb = available_mb.saturating_mul(TILE_RAM_BUDGET_PERCENT) / 100;
+    let budget_percent = budget_percent.clamp(10, 95);
+    let tile_budget_mb = available_mb.saturating_mul(budget_percent) / 100;
     let memory_bound = (tile_budget_mb / per_tile_mb).max(1);
     pool_threads.min(usize::try_from(memory_bound).unwrap_or(usize::MAX))
+}
+
+fn tile_processing_threads(pool_threads: usize, available_mb: u64, fillground: bool) -> usize {
+    tile_processing_threads_budgeted(pool_threads, available_mb, fillground, 20, false)
 }
 
 /// Free RAM in MB.
@@ -1388,13 +1400,20 @@ pub fn generate_world_with_options(
         // Read at the decision point: the precompute above allocates heavily, and an
         // optimistic figure would size the thread pools past what is free.
         let available_mb = available_memory_mb();
-        let tile_batch_size =
-            tile_processing_threads(rayon::current_num_threads(), available_mb, args.fillground);
-        println!(
-            "  Processing {} tiles across {tile_batch_size} threads...",
-            tiles.len()
-        );
         eviction_active = matches!(world_format, WorldFormat::JavaAnvil) && should_stream_to_disk();
+        let target_pool = args.threads.unwrap_or_else(|| rayon::current_num_threads());
+        let tile_batch_size = tile_processing_threads_budgeted(
+            target_pool,
+            available_mb,
+            args.fillground,
+            args.ram_budget_percent,
+            eviction_active,
+        );
+        println!(
+            "  Processing {} tiles across {tile_batch_size} threads (hardware pool: {target_pool}, free RAM: {:.1} GB)...",
+            tiles.len(),
+            available_mb as f64 / 1024.0
+        );
 
         let region_of_tile: Vec<(i32, i32)> =
             tiles.iter().map(|t| (t.min_x >> 9, t.min_z >> 9)).collect();
@@ -1480,6 +1499,7 @@ pub fn generate_world_with_options(
         let mut merge_dur = std::time::Duration::ZERO;
         let mut water_steps_dur = std::time::Duration::ZERO;
         let total_tiles = indexed_tiles.len().max(1);
+        let eta_tracker = std::sync::Arc::new(crate::eta::EtaTracker::new("tiles", total_tiles));
         // Counted per tile, not per element: measured per-tile cost is near flat
         // (the area work dominates), so tile count tracks time despite LPT order.
         let mut tiles_merged = 0usize;
@@ -1845,9 +1865,18 @@ pub fn generate_world_with_options(
 
                         // Step 20%->70% per merged tile, throttled to whole-percent steps.
                         tiles_merged += 1;
+                        eta_tracker.inc();
                         let pct = 20.0 + (tiles_merged as f64 / total_tiles as f64) * 50.0;
-                        if pct - last_emitted_pct >= 1.0 {
-                            emit_gui_progress_update_ex(pct, "Generating area...", eviction_active);
+                        if pct - last_emitted_pct >= 1.0 || tiles_merged == total_tiles {
+                            let eta_info = eta_tracker.format_summary();
+                            if !crate::progress::is_running_with_gui() {
+                                println!("  Generating area... {eta_info}");
+                            }
+                            emit_gui_progress_update_ex(
+                                pct,
+                                &format!("Generating area... {eta_info}"),
+                                eviction_active,
+                            );
                             last_emitted_pct = pct;
                         }
                         // Shaping is reported on its own line.

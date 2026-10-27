@@ -1144,6 +1144,24 @@ fn relation_rings(
     closed
 }
 
+/// Configures the rayon global thread pool to use an explicit thread count,
+/// or 100% of logical CPU cores if None is passed.
+pub fn configure_rayon_threads(threads: Option<usize>) {
+    if std::env::var_os("RAYON_NUM_THREADS").is_some() {
+        return;
+    }
+
+    let target_threads = threads.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+    });
+
+    let _ = rayon::ThreadPoolBuilder::new()
+        .num_threads(target_threads.max(1))
+        .build_global();
+}
+
 /// Configures the global Rayon thread pool with a CPU usage cap.
 ///
 /// Call this once at startup before any parallel operations.
@@ -1166,20 +1184,7 @@ pub fn configure_rayon_thread_pool(cpu_fraction: f64) {
         .unwrap_or(4);
 
     let target_threads = ((available_cores as f64) * cpu_fraction).floor() as usize;
-    let target_threads = target_threads.max(1); // At least 1 thread
-
-    // Only configure if we haven't already (this can only be called once)
-    match rayon::ThreadPoolBuilder::new()
-        .num_threads(target_threads)
-        .build_global()
-    {
-        Ok(()) => {
-            // Successfully configured (silent to avoid cluttering output)
-        }
-        Err(_) => {
-            // Thread pool already configured
-        }
-    }
+    configure_rayon_threads(Some(target_threads.max(1)));
 }
 
 #[cfg(test)]

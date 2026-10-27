@@ -1,4 +1,5 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// Console subsystem enabled for full CLI output & telemetry
+#![cfg_attr(not(debug_assertions), windows_subsystem = "console")]
 
 mod args;
 mod bedrock_block_map;
@@ -25,6 +26,7 @@ mod ecoregion;
 mod element_processing;
 mod elevation;
 mod elevation_data;
+pub mod eta;
 mod floodfill;
 mod floodfill_cache;
 mod geo_grid;
@@ -32,6 +34,7 @@ mod grid_ops;
 mod ground;
 mod ground_decoration;
 mod ground_generation;
+pub mod hardware;
 mod land_cover;
 mod landmarks;
 mod luanti_block_map;
@@ -185,9 +188,6 @@ fn exit_failed() -> ! {
 }
 
 fn run_cli() {
-    // Configure thread pool with 90% CPU cap to keep system responsive
-    floodfill_cache::configure_rayon_thread_pool(0.9);
-
     // Clean up old cached elevation tiles on startup
     elevation_data::cleanup_old_cached_tiles();
 
@@ -205,8 +205,9 @@ fn run_cli() {
         ███    █▀    ███    ███  ▀█   █▀  █▀    ▄████████▀
                      ███    ███
 
-                          version {}
-                {}
+                     FAST-ARNIS version {}
+            Hardware-Optimized Real-World Generator
+            {}
         "#,
         version,
         repository.bright_white().bold()
@@ -224,6 +225,24 @@ fn run_cli() {
     if let Err(e) = args::validate_args(&args) {
         eprintln!("{}: {}", "Error".red().bold(), e);
         std::process::exit(1);
+    }
+
+    // Configure thread pool: default to 100% of logical CPU cores (or explicit --threads)
+    floodfill_cache::configure_rayon_threads(args.threads);
+
+    if args.hardware_test {
+        hardware::run_hardware_benchmark_and_limits_test();
+        return;
+    }
+
+    if args.hardware_info {
+        let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let test_bbox = args.bbox.unwrap_or_else(|| {
+            crate::coordinate_system::geographic::LLBBox::from_str("45.818,5.956,47.808,10.492").unwrap()
+        });
+        let report = hardware::check_soft_limits(&test_bbox, args.scale, &current_dir, true);
+        hardware::print_hardware_summary(&report);
+        return;
     }
 
     // Cave zone-map mode renders the cave biome layout for --bbox and exits, before any world
@@ -384,28 +403,6 @@ fn run_cli() {
     }
     let args = args;
 
-    // Heads-up for very large areas: long, memory-heavy (about 6 GB here, the GUI's "very
-    // large" tier) and heavy on the public elevation servers. Non-blocking.
-    {
-        const MAX_RECOMMENDED_AREA_KM2: f64 = 200.0;
-        // area_km2 assumes Earth's radius, so a Moon bbox reads 13x too large.
-        let r = args.body.scale_ratio();
-        let area_km2 = effective_bbox.area_km2() * r * r;
-        // Blocks, and with them memory, grow with the square of the world scale.
-        let at_scale_1 = area_km2 * args.scale * args.scale;
-        // Earth only: the coarse fixed scale makes a large area the normal case.
-        if args.body.is_earth() && at_scale_1 > MAX_RECOMMENDED_AREA_KM2 {
-            eprintln!(
-                "{} Large area selected (~{:.0} km² at scale {:.2}). Generation may take \
-                 several minutes, use many GB of memory and place heavy load on public \
-                 elevation servers. Use a smaller area or scale if this was unintended.",
-                "Note:".yellow().bold(),
-                area_km2,
-                args.scale
-            );
-        }
-    }
-
     // Determine world format and output path
     let world_format = if args.bedrock {
         world_editor::WorldFormat::BedrockMcWorld
@@ -430,6 +427,10 @@ fn run_cli() {
             .unwrap_or_else(world_utils::get_luanti_worlds_directory),
         (None, world_editor::WorldFormat::JavaAnvil) => args.path.clone().unwrap_or_default(),
     };
+
+    // Fast-Arnis Hardware Telemetry & Soft World Generation Limits
+    let soft_limits_report = hardware::check_soft_limits(&effective_bbox, args.scale, &disk_dir, true);
+    hardware::print_hardware_summary(&soft_limits_report);
     if let Err(e) = world_utils::check_run_size(&args, &effective_bbox, world_format, &disk_dir) {
         eprintln!("{} {}", "Error:".red().bold(), e.detail);
         exit_failed();

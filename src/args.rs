@@ -107,6 +107,30 @@ pub struct Args {
     #[arg(long = "terrain", hide = true)]
     pub legacy_terrain: bool,
 
+    /// Display full system hardware detection (CPU cores, RAM, GPU, storage) and compute score
+    #[arg(long, default_value_t = false)]
+    pub hardware_info: bool,
+
+    /// Run the hardware power benchmark and soft world generation limits test suite
+    #[arg(long, default_value_t = false)]
+    pub hardware_test: bool,
+
+    /// Switzerland preset: automatically sets the bounding box to Switzerland (45.818,5.956,47.808,10.492)
+    #[arg(long, default_value_t = false)]
+    pub switzerland: bool,
+
+    /// Override thread count for parallel processing (defaults to 100% of logical CPU cores)
+    #[arg(long)]
+    pub threads: Option<usize>,
+
+    /// Percentage of free RAM allowed for concurrent tile generation memory (default: 75%)
+    #[arg(long, default_value_t = 75)]
+    pub ram_budget_percent: u64,
+
+    /// Bypass soft world area caps and allow massive generation like Switzerland
+    #[arg(long, default_value_t = false)]
+    pub unlimited_area: bool,
+
     /// Enable interior generation (optional, off unless requested)
     #[arg(long, default_value_t = false, action = ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
     pub interior: bool,
@@ -754,6 +778,9 @@ pub fn apply_feature_needs(args: &mut Args) {
 /// CLI and the GUI so the two cannot disagree about what Moon/Mars means, or
 /// what a blueprint leaves out.
 pub fn apply_body_defaults(args: &mut Args) {
+    if args.switzerland && args.bbox.is_none() {
+        args.bbox = Some(crate::coordinate_system::geographic::LLBBox::from_str("45.818,5.956,47.808,10.492").unwrap());
+    }
     apply_mode_defaults(args);
     if args.body.is_earth() {
         return;
@@ -814,6 +841,10 @@ pub const DEFAULT_WORLD_TIME: i64 = 6_000;
 pub const MIDNIGHT_TICKS: i64 = 18_000;
 
 pub fn validate_args(args: &Args) -> Result<(), String> {
+    if args.hardware_info || args.hardware_test {
+        return Ok(());
+    }
+
     // Moon/Mars scale is ours, and sits below MIN_SCALE by design.
     if args.body.is_earth() {
         validate_scale(args.scale)?;

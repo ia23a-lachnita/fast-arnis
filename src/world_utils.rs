@@ -494,11 +494,11 @@ pub fn check_run_size(
         && args.file.is_none()
         && !args.no_tile_archive
         && !args.osm_tiles_url.is_empty();
-    if from_archive {
+    if from_archive && !args.unlimited_area {
         if let Err(e) = crate::osm_tiles::check_size(bbox, args.scale) {
             return Err(RunSizeError {
                 area: true,
-                detail: format!("The area is too large: {e}. Select a smaller area."),
+                detail: format!("The area is too large: {e}. Select a smaller area or pass --unlimited-area."),
             });
         }
     }
