@@ -119,6 +119,15 @@ pub struct Args {
     #[arg(long, default_value_t = false)]
     pub switzerland: bool,
 
+    /// Restrict generation inside a user-defined closed polygon ("lat1,lng1;lat2,lng2;lat3,lng3;...").
+    /// Only areas inside this closed shape are generated, skipping exterior regions to save memory and disk.
+    #[arg(long)]
+    pub polygon: Option<String>,
+
+    /// Clip generation strictly inside Switzerland's official border polygon rather than the entire rectangular bounding box (~46% reduction in disk space).
+    #[arg(long, default_value_t = false)]
+    pub swiss_border: bool,
+
     /// Override thread count for parallel processing (defaults to 100% of logical CPU cores)
     #[arg(long)]
     pub threads: Option<usize>,
@@ -778,7 +787,7 @@ pub fn apply_feature_needs(args: &mut Args) {
 /// CLI and the GUI so the two cannot disagree about what Moon/Mars means, or
 /// what a blueprint leaves out.
 pub fn apply_body_defaults(args: &mut Args) {
-    if args.switzerland && args.bbox.is_none() {
+    if (args.switzerland || args.swiss_border) && args.bbox.is_none() {
         args.bbox = Some(crate::coordinate_system::geographic::LLBBox::from_str("45.818,5.956,47.808,10.492").unwrap());
     }
     apply_mode_defaults(args);

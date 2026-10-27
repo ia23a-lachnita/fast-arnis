@@ -1365,7 +1365,45 @@ pub fn generate_world_with_options(
 
     // Decide between sequential and parallel processing based on world size.
     // Tile subdivision is aligned to 512-block Minecraft region boundaries.
-    let tiles = tile::create_tiles(&xzbbox, tile::DEFAULT_TILE_SIZE);
+    let mut tiles = tile::create_tiles(&xzbbox, tile::DEFAULT_TILE_SIZE);
+
+    // Apply polygon mask or Swiss national border filtering if requested
+    let polygon_mask = if args.swiss_border {
+        Some(crate::polygon_mask::PolygonMask::switzerland_border())
+    } else if let Some(poly_str) = &args.polygon {
+        match crate::polygon_mask::PolygonMask::parse(poly_str) {
+            Ok(mask) => Some(mask),
+            Err(e) => {
+                eprintln!("Warning: Failed to parse polygon mask ({e}), generating full area.");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    if let (Some(mask), Ok((transformer, _))) = (
+        &polygon_mask,
+        crate::projection::ProjectionSpec::from_args(args).transformer(&llbbox),
+    ) {
+        let cartesian_poly = mask.to_cartesian(&transformer);
+        let before_count = tiles.len();
+        tiles.retain(|t| {
+            crate::polygon_mask::PolygonMask::cartesian_intersects_tile(
+                &cartesian_poly,
+                t.min_x,
+                t.min_z,
+                t.max_x,
+                t.max_z,
+            )
+        });
+        println!(
+            "  Polygon boundary active: retained {}/{} tiles ({:.1}% excluded outside shape/border to save memory & disk).",
+            tiles.len(),
+            before_count,
+            (before_count.saturating_sub(tiles.len()) as f64 / before_count.max(1) as f64) * 100.0
+        );
+    }
 
     // Tile editors are created as JavaAnvil (WorldEditor::new), so their
     // format-dependent block-entity schema (banners) only matches Java output.

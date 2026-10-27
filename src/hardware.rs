@@ -9,6 +9,35 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
+/// Information about a detected storage volume/disk.
+#[derive(Debug, Clone)]
+pub struct DiskDriveInfo {
+    pub mount_point: String,
+    pub name: String,
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+    pub is_hdd: bool,
+    pub is_target: bool,
+}
+
+impl DiskDriveInfo {
+    pub fn free_gb(&self) -> f64 {
+        self.free_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+    }
+
+    pub fn total_gb(&self) -> f64 {
+        self.total_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+    }
+
+    pub fn media_type_str(&self) -> &'static str {
+        if self.is_hdd {
+            "HDD (Mechanical)"
+        } else {
+            "SSD (Solid State)"
+        }
+    }
+}
+
 /// System hardware specifications detected at runtime.
 #[derive(Debug, Clone)]
 pub struct HardwareSpecs {
@@ -20,6 +49,8 @@ pub struct HardwareSpecs {
     pub gpu_name: Option<String>,
     pub gpu_vram_bytes: Option<u64>,
     pub disk_free_bytes: u64,
+    pub disks: Vec<DiskDriveInfo>,
+    pub target_disk: Option<DiskDriveInfo>,
 }
 
 impl HardwareSpecs {
@@ -50,7 +81,7 @@ impl HardwareSpecs {
     }
 }
 
-/// Detects system hardware across CPU, RAM, GPU, and target disk.
+/// Detects system hardware across CPU, RAM, GPU, and all mounted disks.
 pub fn detect_hardware(target_path: Option<&Path>) -> HardwareSpecs {
     let mut sys = sysinfo::System::new();
     sys.refresh_memory();
@@ -80,6 +111,32 @@ pub fn detect_hardware(target_path: Option<&Path>) -> HardwareSpecs {
 
     let disk_free_bytes = fs2::available_space(&disk_probe).unwrap_or(0);
 
+    let abs_probe = disk_probe.canonicalize().unwrap_or(disk_probe.clone());
+    let probe_str = abs_probe.to_string_lossy().to_uppercase();
+
+    let mut disks_list = Vec::new();
+    let sys_disks = sysinfo::Disks::new_with_refreshed_list();
+    for d in sys_disks.list() {
+        let mount = d.mount_point().to_string_lossy().to_string();
+        let mount_clean = mount.trim_end_matches(['\\', '/']).to_string();
+        let is_target = if !mount_clean.is_empty() {
+            probe_str.starts_with(&mount_clean.to_uppercase())
+        } else {
+            false
+        };
+        let is_hdd = d.kind() == sysinfo::DiskKind::HDD;
+        disks_list.push(DiskDriveInfo {
+            mount_point: mount,
+            name: d.name().to_string_lossy().to_string(),
+            total_bytes: d.total_space(),
+            free_bytes: d.available_space(),
+            is_hdd,
+            is_target,
+        });
+    }
+
+    let target_disk = disks_list.iter().find(|d| d.is_target).cloned();
+
     HardwareSpecs {
         cpu_name,
         cpu_physical_cores,
@@ -89,6 +146,8 @@ pub fn detect_hardware(target_path: Option<&Path>) -> HardwareSpecs {
         gpu_name,
         gpu_vram_bytes,
         disk_free_bytes,
+        disks: disks_list,
+        target_disk,
     }
 }
 
@@ -140,6 +199,10 @@ pub struct WorldResourceEstimate {
     pub resident_ram_needed_bytes: u64,
     pub streaming_ram_peak_bytes: u64,
     pub estimated_disk_bytes: u64,
+    pub compute_seconds: f64,
+    pub disk_io_seconds: f64,
+    pub is_target_hdd: bool,
+    pub disk_write_rate_mb_s: f64,
     pub estimated_generation_seconds: f64,
 }
 
@@ -178,7 +241,20 @@ impl WorldResourceEstimate {
         // Score 1000 ~= 15 tiles/s. Total tiles approx total_regions.
         let power = hardware.compute_power_score().max(100) as f64;
         let tiles_per_second = (power / 100.0) * 0.8;
-        let estimated_generation_seconds = (total_regions as f64 / tiles_per_second).max(1.0);
+        let compute_seconds = (total_regions as f64 / tiles_per_second).max(1.0);
+
+        // Disk I/O throughput:
+        // SSD write speed ~1200 MB/s, HDD write speed ~80 MB/s (due to seek overhead on chunk writes)
+        let is_target_hdd = hardware
+            .target_disk
+            .as_ref()
+            .map(|d| d.is_hdd)
+            .unwrap_or(false);
+        let disk_write_rate_mb_s = if is_target_hdd { 80.0 } else { 1200.0 };
+        let disk_io_seconds = (estimated_disk_bytes as f64 / 1e6) / disk_write_rate_mb_s;
+
+        // Overall ETA bounded by compute and I/O pipeline
+        let estimated_generation_seconds = compute_seconds.max(disk_io_seconds);
 
         Self {
             area_km2,
@@ -192,6 +268,10 @@ impl WorldResourceEstimate {
             resident_ram_needed_bytes,
             streaming_ram_peak_bytes,
             estimated_disk_bytes,
+            compute_seconds,
+            disk_io_seconds,
+            is_target_hdd,
+            disk_write_rate_mb_s,
             estimated_generation_seconds,
         }
     }
@@ -244,12 +324,39 @@ pub fn check_soft_limits(
         ));
     }
 
+    let target_drive = hardware.target_disk.as_ref();
+    let target_mount = target_drive.map(|d| d.mount_point.as_str()).unwrap_or("target drive");
+    let target_type = target_drive.map(|d| d.media_type_str()).unwrap_or("Disk");
+
     if exceeds_free_disk {
         warnings.push(format!(
-            "World requires ~{:.1} GB disk space, but target drive has only {:.1} GB free.",
+            "World requires ~{:.1} GB disk space, but target drive {} ({}) has only {:.1} GB free.",
             estimate.estimated_disk_bytes as f64 / 1e9,
+            target_mount,
+            target_type,
             hardware.disk_free_gb()
         ));
+
+        // Look for another mounted disk with ample free space!
+        if let Some(alt) = hardware.disks.iter().find(|d| !d.is_target && d.free_bytes > estimate.estimated_disk_bytes) {
+            warnings.push(format!(
+                "RECOMMENDATION: Target disk has insufficient space, but drive {} ({}) has {:.1} GB free! Run with --output-dir \"{}\\minecraft_worlds\"",
+                alt.mount_point,
+                alt.media_type_str(),
+                alt.free_gb(),
+                alt.mount_point.trim_end_matches(['\\', '/'])
+            ));
+        }
+    } else if let Some(td) = target_drive {
+        if td.is_hdd && estimate.estimated_disk_bytes > 5_000_000_000 {
+            warnings.push(format!(
+                "Notice: Target drive {} is an HDD (mechanical). Writing {:.1} GB will be disk I/O bound (~{:.1} MB/s, est. I/O time: {:.1} min). If an SSD is available, it would generate faster.",
+                td.mount_point,
+                estimate.estimated_disk_bytes as f64 / 1e9,
+                estimate.disk_write_rate_mb_s,
+                estimate.disk_io_seconds / 60.0
+            ));
+        }
     }
 
     if exceeds_soft_area_threshold {
@@ -259,6 +366,12 @@ pub fn check_soft_limits(
             estimate.total_blocks as f64 / 1e9,
             recommended_threads
         ));
+    }
+
+    if estimate.area_km2 > 1000.0 {
+        warnings.push(
+            "TIP (LOD preloading): For country-scale worlds, use --dh-lod to generate pre-computed Distant Horizons LOD octrees into DistantHorizons.sqlite. The entire territory renders out to the horizon on join while keeping Minecraft region chunks localized!".to_string()
+        );
     }
 
     SoftLimitsReport {
@@ -308,10 +421,32 @@ pub fn print_hardware_summary(report: &SoftLimitsReport) {
     } else {
         println!("  GPU:       None / Integrated");
     }
-    println!(
-        "  Disk:      {:.1} GB free on target drive",
-        hw.disk_free_gb()
-    );
+
+    if !hw.disks.is_empty() {
+        println!("  Disks Detected ({} volumes):", hw.disks.len());
+        for d in &hw.disks {
+            let active = if d.is_target {
+                format!(" {}", "[TARGET DRIVE]".bright_yellow().bold())
+            } else {
+                String::new()
+            };
+            println!(
+                "    - Drive {:<3} {:<18} | Free: {:>7.1} GB / {:>7.1} GB | {}{}",
+                d.mount_point,
+                d.media_type_str(),
+                d.free_gb(),
+                d.total_gb(),
+                d.name,
+                active
+            );
+        }
+    } else {
+        println!(
+            "  Disk:      {:.1} GB free on target drive",
+            hw.disk_free_gb()
+        );
+    }
+
     println!(
         "  Power:     Rating {} pts",
         hw.compute_power_score().to_string().yellow().bold()
@@ -345,8 +480,11 @@ pub fn print_hardware_summary(report: &SoftLimitsReport) {
         est.streaming_ram_peak_bytes as f64 / 1e9
     );
     println!(
-        "  Time Est:  ~{:.1} min at full multi-threading",
-        est.estimated_generation_seconds / 60.0
+        "  Time Est:  ~{:.1} min (Compute: ~{:.1} min, Disk I/O: ~{:.1} min on {})",
+        est.estimated_generation_seconds / 60.0,
+        est.compute_seconds / 60.0,
+        est.disk_io_seconds / 60.0,
+        if est.is_target_hdd { "HDD" } else { "SSD" }
     );
 
     if !report.warnings.is_empty() {
@@ -506,6 +644,7 @@ mod tests {
         assert!(hw.cpu_logical_cores >= 1);
         assert!(hw.ram_total_bytes > 0);
         assert!(!hw.cpu_name.is_empty());
+        assert!(!hw.disks.is_empty());
     }
 
     #[test]

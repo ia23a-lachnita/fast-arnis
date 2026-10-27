@@ -52,6 +52,7 @@ mod ore_generation;
 mod osm_parser;
 mod osm_tiles;
 mod overture;
+pub mod polygon_mask;
 #[cfg(feature = "gui")]
 mod preview_3d;
 #[cfg(feature = "gui")]
@@ -237,10 +238,11 @@ fn run_cli() {
 
     if args.hardware_info {
         let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let target_dir = args.path.as_deref().unwrap_or(&current_dir);
         let test_bbox = args.bbox.unwrap_or_else(|| {
             crate::coordinate_system::geographic::LLBBox::from_str("45.818,5.956,47.808,10.492").unwrap()
         });
-        let report = hardware::check_soft_limits(&test_bbox, args.scale, &current_dir, true);
+        let report = hardware::check_soft_limits(&test_bbox, args.scale, target_dir, true);
         hardware::print_hardware_summary(&report);
         return;
     }
