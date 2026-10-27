@@ -1790,6 +1790,17 @@ fn gui_start_generation(
                 return Err(e.detail);
             }
 
+            // Fast-Arnis: Evaluate hardware capacity and emit soft limit telemetry to GUI
+            let soft_report = crate::hardware::check_soft_limits(&bbox, args.scale, &disk_dir, true);
+            if !soft_report.is_safe() {
+                for warning in &soft_report.warnings {
+                    eprintln!("[Fast-Arnis Soft Limit] {warning}");
+                }
+                if let Some(first_warn) = soft_report.warnings.first() {
+                    emit_gui_progress_update(progress::MESSAGE_ONLY, &format!("Warning: {first_warn}"));
+                }
+            }
+
             // Determine output path and level name based on format
             let (generation_path, level_name) = match world_format {
                 WorldFormat::JavaAnvil => {
