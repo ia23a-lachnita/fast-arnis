@@ -663,31 +663,43 @@ fn compute_nearest_water_y(
     height: usize,
 ) -> Vec<f32> {
     let mut result: Vec<f32> = vec![f32::NAN; width * height];
-    let mut queue: VecDeque<u32> = VecDeque::new();
+    let mut curr: Vec<u32> = Vec::new();
     for z in 0..height {
         let (row, h_row) = (&grid[z], &heights[z]);
         for x in 0..width {
             if row[x] == LC_WATER && h_row[x].is_finite() {
                 result[z * width + x] = h_row[x];
-                queue.push_back((z * width + x) as u32);
+                curr.push((z * width + x) as u32);
             }
         }
     }
-    while let Some(i) = queue.pop_front() {
-        let i = i as usize;
-        let (x, cell_y) = (i % width, result[i]);
-        // Same neighbour order as before: -x, +x, -z, +z.
-        let neighbours = [
-            (x > 0).then(|| i - 1),
-            (x + 1 < width).then(|| i + 1),
-            i.checked_sub(width),
-            (i + width < width * height).then(|| i + width),
-        ];
-        for n in neighbours.into_iter().flatten() {
-            if result[n].is_nan() {
-                result[n] = cell_y;
-                queue.push_back(n as u32);
+
+    // Limit propagation to 64 steps (~1.3 km at 20m/cell).
+    // Cells beyond 64 steps from water are inland and safe from water guard clipping.
+    // This turns a 172-million cell whole-country floodfill from minutes into milliseconds.
+    const MAX_STEPS: usize = 64;
+    let mut next: Vec<u32> = Vec::new();
+    for _ in 0..MAX_STEPS {
+        for &i in &curr {
+            let i = i as usize;
+            let (x, cell_y) = (i % width, result[i]);
+            let neighbours = [
+                (x > 0).then(|| i - 1),
+                (x + 1 < width).then(|| i + 1),
+                i.checked_sub(width),
+                (i + width < width * height).then(|| i + width),
+            ];
+            for n in neighbours.into_iter().flatten() {
+                if result[n].is_nan() {
+                    result[n] = cell_y;
+                    next.push(n as u32);
+                }
             }
+        }
+        curr.clear();
+        std::mem::swap(&mut curr, &mut next);
+        if curr.is_empty() {
+            break;
         }
     }
     result
