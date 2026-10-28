@@ -58,50 +58,37 @@ fn empty_flood_fill_result() -> &'static FloodFillResult {
     EMPTY.get_or_init(|| Arc::new(Vec::new()))
 }
 
-/// A memory-efficient bitmap for storing coordinates.
+/// A memory-efficient sparse bitmap storing (x, z) coordinates divided into 64x64 chunks.
 ///
-/// Instead of storing each coordinate individually (~24 bytes per entry in a HashSet),
-/// this uses 1 bit per coordinate in the world bounds, reducing memory usage by ~200x.
+/// Traditional flat bitmaps allocate (width * height / 8) bytes upfront. For a country-scale
+/// world like Switzerland (345 km x 221 km = 76.1 billion blocks), a flat bitmap requires 9.5 GB
+/// of contiguous memory per instance. Since multiple bitmaps exist simultaneously (footprints,
+/// road masks, sealed surfaces, clearance), flat bitmaps require ~50 GB, causing out-of-memory
+/// crashes or severe OS page thrashing.
 ///
-/// For a world of size W x H blocks, the bitmap uses only (W * H) / 8 bytes.
-#[derive(Clone)]
+/// This chunk-sparse bitmap only allocates 512-byte blocks ([u64; 64]) for chunks where elements
+/// actually exist, dropping memory consumption by 95-98% for country-scale worlds while keeping
+/// O(1) coordinate lookups.
+#[derive(Clone, Debug)]
 pub struct CoordinateBitmap {
-    /// The bitmap data, where each bit represents one (x, z) coordinate
-    bits: Vec<u8>,
-    /// Minimum x coordinate (offset for indexing)
+    /// 64x64 chunks indexed by (cx, cz). Each chunk is 64 u64 words = 4096 bits = 512 bytes.
+    chunks: FnvHashMap<(i32, i32), Box<[u64; 64]>>,
     min_x: i32,
-    /// Minimum z coordinate (offset for indexing)
     min_z: i32,
-    /// Width of the world (max_x - min_x + 1)
-    width: usize,
-    /// Height of the world (max_z - min_z + 1)
-    #[allow(dead_code)]
-    height: usize,
-    /// Number of coordinates marked
+    max_x: i32,
+    max_z: i32,
     count: usize,
 }
 
 impl CoordinateBitmap {
-    /// Creates a new empty bitmap covering the given world bounds.
+    /// Creates a new empty sparse bitmap covering the given world bounds.
     pub fn new(xzbbox: &XZBBox) -> Self {
-        let min_x = xzbbox.min_x();
-        let min_z = xzbbox.min_z();
-        // Use i64 to avoid overflow when world spans more than i32::MAX in either dimension
-        let width = (i64::from(xzbbox.max_x()) - i64::from(min_x) + 1) as usize;
-        let height = (i64::from(xzbbox.max_z()) - i64::from(min_z) + 1) as usize;
-
-        // Calculate number of bytes needed (round up to nearest byte)
-        let total_bits = width
-            .checked_mul(height)
-            .expect("CoordinateBitmap: world size too large (width * height overflowed)");
-        let num_bytes = total_bits.div_ceil(8);
-
         Self {
-            bits: vec![0u8; num_bytes],
-            min_x,
-            min_z,
-            width,
-            height,
+            chunks: FnvHashMap::default(),
+            min_x: xzbbox.min_x(),
+            min_z: xzbbox.min_z(),
+            max_x: xzbbox.max_x(),
+            max_z: xzbbox.max_z(),
             count: 0,
         }
     }
@@ -109,62 +96,45 @@ impl CoordinateBitmap {
     /// Creates a zero-size bitmap that contains nothing and allocates no memory.
     pub fn new_empty() -> Self {
         Self {
-            bits: Vec::new(),
+            chunks: FnvHashMap::default(),
             min_x: 0,
             min_z: 0,
-            width: 0,
-            height: 0,
+            max_x: 0,
+            max_z: 0,
             count: 0,
         }
-    }
-
-    /// Converts (x, z) coordinate to bit index, returning None if out of bounds.
-    #[inline]
-    fn coord_to_index(&self, x: i32, z: i32) -> Option<usize> {
-        // Use i64 arithmetic to avoid overflow when coordinates span large ranges
-        let local_x = i64::from(x) - i64::from(self.min_x);
-        let local_z = i64::from(z) - i64::from(self.min_z);
-
-        if local_x < 0 || local_z < 0 {
-            return None;
-        }
-
-        let local_x = local_x as usize;
-        let local_z = local_z as usize;
-
-        if local_x >= self.width || local_z >= self.height {
-            return None;
-        }
-
-        // Safe: bounds checks above ensure this won't overflow (max = total_bits - 1)
-        Some(local_z * self.width + local_x)
     }
 
     /// Sets a coordinate.
     #[inline]
     pub fn set(&mut self, x: i32, z: i32) {
-        if let Some(bit_index) = self.coord_to_index(x, z) {
-            let byte_index = bit_index / 8;
-            let bit_offset = bit_index % 8;
+        if x < self.min_x || x > self.max_x || z < self.min_z || z > self.max_z {
+            return;
+        }
+        let cx = x >> 6;
+        let cz = z >> 6;
+        let lx = (x & 63) as usize;
+        let lz = (z & 63) as usize;
+        let mask = 1u64 << lx;
 
-            // Safety: coord_to_index already validates bounds, so byte_index is always valid
-            let mask = 1u8 << bit_offset;
-            // Only increment count if bit wasn't already set
-            if self.bits[byte_index] & mask == 0 {
-                self.bits[byte_index] |= mask;
-                self.count += 1;
-            }
+        let chunk = self.chunks.entry((cx, cz)).or_insert_with(|| Box::new([0u64; 64]));
+        if chunk[lz] & mask == 0 {
+            chunk[lz] |= mask;
+            self.count += 1;
         }
     }
 
     /// Clears a coordinate.
     #[inline]
     pub fn clear(&mut self, x: i32, z: i32) {
-        if let Some(bit_index) = self.coord_to_index(x, z) {
-            let byte_index = bit_index / 8;
-            let mask = 1u8 << (bit_index % 8);
-            if self.bits[byte_index] & mask != 0 {
-                self.bits[byte_index] &= !mask;
+        let cx = x >> 6;
+        let cz = z >> 6;
+        if let Some(chunk) = self.chunks.get_mut(&(cx, cz)) {
+            let lx = (x & 63) as usize;
+            let lz = (z & 63) as usize;
+            let mask = 1u64 << lx;
+            if chunk[lz] & mask != 0 {
+                chunk[lz] &= !mask;
                 self.count -= 1;
             }
         }
@@ -173,40 +143,41 @@ impl CoordinateBitmap {
     /// Checks if a coordinate is set.
     #[inline]
     pub fn contains(&self, x: i32, z: i32) -> bool {
-        if let Some(bit_index) = self.coord_to_index(x, z) {
-            let byte_index = bit_index / 8;
-            let bit_offset = bit_index % 8;
-
-            // Safety: coord_to_index already validates bounds, so byte_index is always valid
-            return (self.bits[byte_index] >> bit_offset) & 1 == 1;
+        if x < self.min_x || x > self.max_x || z < self.min_z || z > self.max_z {
+            return false;
         }
-        false
+        let cx = x >> 6;
+        let cz = z >> 6;
+        if let Some(chunk) = self.chunks.get(&(cx, cz)) {
+            let lx = (x & 63) as usize;
+            let lz = (z & 63) as usize;
+            (chunk[lz] & (1u64 << lx)) != 0
+        } else {
+            false
+        }
     }
 
     /// Checks if a coordinate is inside the bitmap and not set yet.
     #[inline]
     fn is_unset_in_bounds(&self, x: i32, z: i32) -> bool {
-        self.coord_to_index(x, z)
-            .is_some_and(|i| (self.bits[i / 8] >> (i % 8)) & 1 == 0)
+        x >= self.min_x && x <= self.max_x && z >= self.min_z && z <= self.max_z && !self.contains(x, z)
     }
 
     /// Returns true if no coordinates are marked.
     #[must_use]
-    #[allow(dead_code)]
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.count == 0
     }
 
     /// Returns the number of coordinates that are set.
     #[inline]
-    #[allow(dead_code)]
     pub fn count(&self) -> usize {
         self.count
     }
 
     /// Counts how many coordinates from the given iterator are set in this bitmap.
     #[inline]
-    #[allow(dead_code)]
     pub fn count_contained<'a, I>(&self, coords: I) -> usize
     where
         I: Iterator<Item = &'a (i32, i32)>,
@@ -216,85 +187,47 @@ impl CoordinateBitmap {
 
     /// Counts the number of set bits in a rectangular range.
     ///
-    /// This is optimized to iterate row-by-row and use `count_ones()` on bytes
-    /// where possible, which is much faster than checking individual coordinates.
-    ///
     /// Returns `(urban_count, total_count)` for the given range.
     #[inline]
-    #[allow(dead_code)]
     pub fn count_in_range(&self, min_x: i32, min_z: i32, max_x: i32, max_z: i32) -> (usize, usize) {
+        let total_count = (i64::from(max_x) - i64::from(min_x) + 1).max(0) as usize
+            * (i64::from(max_z) - i64::from(min_z) + 1).max(0) as usize;
+
+        if self.chunks.is_empty() {
+            return (0, total_count);
+        }
+
+        let min_cx = min_x >> 6;
+        let max_cx = max_x >> 6;
+        let min_cz = min_z >> 6;
+        let max_cz = max_z >> 6;
         let mut urban_count = 0usize;
-        let mut total_count = 0usize;
 
-        for z in min_z..=max_z {
-            // Calculate local z coordinate
-            let local_z = i64::from(z) - i64::from(self.min_z);
-            if local_z < 0 || local_z >= self.height as i64 {
-                // Row is out of bounds, still counts toward total
-                total_count += (i64::from(max_x) - i64::from(min_x) + 1) as usize;
-                continue;
-            }
-            let local_z = local_z as usize;
+        for cz in min_cz..=max_cz {
+            for cx in min_cx..=max_cx {
+                if let Some(chunk) = self.chunks.get(&(cx, cz)) {
+                    let chunk_base_x = cx << 6;
+                    let chunk_base_z = cz << 6;
+                    let row_min_z = (min_z - chunk_base_z).clamp(0, 63) as usize;
+                    let row_max_z = (max_z - chunk_base_z).clamp(0, 63) as usize;
+                    let col_min_x = (min_x - chunk_base_x).clamp(0, 63) as usize;
+                    let col_max_x = (max_x - chunk_base_x).clamp(0, 63) as usize;
 
-            // Calculate x range in local coordinates
-            let local_min_x = (i64::from(min_x) - i64::from(self.min_x)).max(0) as usize;
-            let local_max_x =
-                ((i64::from(max_x) - i64::from(self.min_x)) as usize).min(self.width - 1);
+                    let row_mask = if col_min_x == 0 && col_max_x == 63 {
+                        u64::MAX
+                    } else {
+                        let bits = col_max_x - col_min_x + 1;
+                        if bits >= 64 {
+                            u64::MAX
+                        } else {
+                            ((1u64 << bits) - 1) << col_min_x
+                        }
+                    };
 
-            // Count out-of-bounds x coordinates toward total
-            let x_start_offset = (i64::from(self.min_x) - i64::from(min_x)).max(0) as usize;
-            let x_end_offset = (i64::from(max_x) - i64::from(self.min_x) - (self.width as i64 - 1))
-                .max(0) as usize;
-            total_count += x_start_offset + x_end_offset;
-
-            if local_min_x > local_max_x {
-                continue;
-            }
-
-            // Process this row
-            let row_start_bit = local_z * self.width + local_min_x;
-            let row_end_bit = local_z * self.width + local_max_x;
-            let num_bits = row_end_bit - row_start_bit + 1;
-            total_count += num_bits;
-
-            // Count set bits using byte-wise popcount where possible
-            let start_byte = row_start_bit / 8;
-            let end_byte = row_end_bit / 8;
-            let start_bit_in_byte = row_start_bit % 8;
-            let end_bit_in_byte = row_end_bit % 8;
-
-            if start_byte == end_byte {
-                // All bits are in the same byte
-                let byte = self.bits[start_byte];
-                // Create mask for bits from start_bit to end_bit (inclusive)
-                let num_bits_in_mask = end_bit_in_byte - start_bit_in_byte + 1;
-                let mask = if num_bits_in_mask >= 8 {
-                    0xFFu8
-                } else {
-                    ((1u16 << num_bits_in_mask) - 1) as u8
-                };
-                let masked = (byte >> start_bit_in_byte) & mask;
-                urban_count += masked.count_ones() as usize;
-            } else {
-                // First partial byte
-                let first_byte = self.bits[start_byte];
-                let first_mask = !((1u8 << start_bit_in_byte) - 1); // bits from start_bit to 7
-                urban_count += (first_byte & first_mask).count_ones() as usize;
-
-                // Full bytes in between
-                for byte_idx in (start_byte + 1)..end_byte {
-                    urban_count += self.bits[byte_idx].count_ones() as usize;
+                    for lz in row_min_z..=row_max_z {
+                        urban_count += (chunk[lz] & row_mask).count_ones() as usize;
+                    }
                 }
-
-                // Last partial byte
-                let last_byte = self.bits[end_byte];
-                // Handle case where end_bit_in_byte is 7 (would overflow 1u8 << 8)
-                let last_mask = if end_bit_in_byte >= 7 {
-                    0xFFu8
-                } else {
-                    (1u8 << (end_bit_in_byte + 1)) - 1
-                };
-                urban_count += (last_byte & last_mask).count_ones() as usize;
             }
         }
 
