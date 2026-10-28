@@ -1405,6 +1405,36 @@ pub fn generate_world_with_options(
         );
     }
 
+    // Auto-resume engine: audit existing world region files for progress recovery
+    if args.resume {
+        let region_dir = output_path.join("region");
+        let resume_report = crate::resume::audit_existing_regions(&region_dir);
+        if resume_report.recovered_regions_count > 0 {
+            println!(
+                "  [Resume Engine] Detected existing world progress! Validated {} existing regions ({} corrupted discarded).",
+                resume_report.recovered_regions_count,
+                resume_report.corrupted_regions_count
+            );
+            let before_tiles = tiles.len();
+            tiles.retain(|t| {
+                let rx = t.min_x >> 9;
+                let rz = t.min_z >> 9;
+                !resume_report.valid_regions.contains(&(rx, rz))
+            });
+            let skipped = before_tiles.saturating_sub(tiles.len());
+            println!(
+                "  [Resume Engine] Fast-forwarded: skipping {} completed tiles ({:.1}% done). Resuming on {} remaining tiles.",
+                skipped,
+                (skipped as f64 / before_tiles.max(1) as f64) * 100.0,
+                tiles.len()
+            );
+            for &r in &resume_report.valid_regions {
+                evicted_regions.insert(r);
+                editor.evict_region(r.0, r.1);
+            }
+        }
+    }
+
     // Tile editors are created as JavaAnvil (WorldEditor::new), so their
     // format-dependent block-entity schema (banners) only matches Java output.
     // Restrict the parallel tile path to Java; Bedrock/Luanti large worlds use

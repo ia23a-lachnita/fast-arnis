@@ -1661,6 +1661,7 @@ fn gui_start_generation(
                 threads: None,
                 ram_budget_percent: 75,
                 unlimited_area: true,
+                resume: true,
                 interior: interior_enabled,
                 fillground: fillground_enabled,
                 caves: caves_enabled,

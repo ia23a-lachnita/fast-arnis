@@ -53,6 +53,7 @@ mod osm_parser;
 mod osm_tiles;
 mod overture;
 pub mod polygon_mask;
+pub mod resume;
 #[cfg(feature = "gui")]
 mod preview_3d;
 #[cfg(feature = "gui")]

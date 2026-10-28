@@ -140,6 +140,10 @@ pub struct Args {
     #[arg(long, default_value_t = false)]
     pub unlimited_area: bool,
 
+    /// Automatically resume world generation from existing valid regions, skipping already finished tiles and purging corrupted ones (default: true).
+    #[arg(long, default_value_t = true, action = ArgAction::Set)]
+    pub resume: bool,
+
     /// Enable interior generation (optional, off unless requested)
     #[arg(long, default_value_t = false, action = ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
     pub interior: bool,

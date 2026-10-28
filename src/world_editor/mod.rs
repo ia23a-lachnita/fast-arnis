@@ -2462,8 +2462,7 @@ impl<'a> WorldEditor<'a> {
     }
 
     /// Drops a region from memory as streaming does once it is written.
-    #[cfg(test)]
-    pub(crate) fn evict_region(&mut self, rx: i32, rz: i32) {
+    pub fn evict_region(&mut self, rx: i32, rz: i32) {
         self.world.regions.remove(&(rx, rz));
         self.flushed_regions.insert((rx, rz));
     }
