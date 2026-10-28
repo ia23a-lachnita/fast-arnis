@@ -100,7 +100,7 @@ const APPLIED_SCRIPTS: [&str; 12] = [
 ];
 
 const INSERT_ROW: &str = "
-INSERT INTO FullData (
+INSERT OR REPLACE INTO FullData (
     DetailLevel, PosX, PosZ, MinY, DataChecksum,
     Data, ColumnGenerationStep, ColumnWorldCompressionMode, Mapping,
     NorthAdjData, SouthAdjData, EastAdjData, WestAdjData,
@@ -136,23 +136,29 @@ impl DhWriter {
             .join("dimensions/minecraft/overworld/data")
             .join(DB_NAME);
         let staging = dir.join(format!("{DB_NAME}.arnis-tmp"));
-        // A regenerated world must not keep LODs of the terrain it replaced.
-        remove_database(&path)?;
-        remove_database(&dimensions_path)?;
-        remove_database(&staging)?;
+        // Keep existing database on resume so previous LOD generation isn't lost
+        let is_existing = staging.exists() || path.exists();
+        if !is_existing {
+            remove_database(&path)?;
+            remove_database(&dimensions_path)?;
+            remove_database(&staging)?;
+        } else if !staging.exists() && path.exists() {
+            let _ = fs::copy(&path, &staging);
+        }
 
         let conn = Connection::open(&staging)?;
         conn.execute_batch(
             "PRAGMA journal_mode = OFF;
              PRAGMA synchronous = OFF;
-             PRAGMA locking_mode = EXCLUSIVE;",
+             PRAGMA locking_mode = EXCLUSIVE;
+             PRAGMA cache_size = -32000;", // Limit SQLite page cache to 32 MB to prevent OOM
         )?;
         conn.execute_batch(SCHEMA)?;
         for script in APPLIED_SCRIPTS {
-            conn.execute(
-                "INSERT INTO Schema (ScriptName) VALUES (?1)",
+            let _ = conn.execute(
+                "INSERT OR IGNORE INTO Schema (ScriptName) VALUES (?1)",
                 [format!("sqlScripts/{script}")],
-            )?;
+            );
         }
         conn.execute_batch("BEGIN")?;
 
@@ -218,12 +224,21 @@ impl DhWriter {
                 self.created_ms,
             ])
         });
+        let mut should_commit = false;
         match result {
             Ok(_) => {
                 state.sections += 1;
                 state.bytes += row.len() as u64;
+                if state.sections % 500 == 0 {
+                    should_commit = true;
+                }
             }
             Err(e) => state.error = Some(e.to_string()),
+        }
+        if should_commit {
+            if let Some(conn) = state.conn.as_ref() {
+                let _ = conn.execute_batch("COMMIT; BEGIN;");
+            }
         }
     }
 
@@ -277,13 +292,13 @@ fn place_twin(path: &Path, twin: &Path) -> std::io::Result<()> {
     fs::hard_link(path, twin).or_else(|_| fs::copy(path, twin).map(|_| ()))
 }
 
-/// A run that fails before [`DhWriter::finish`] leaves no staging file behind.
+/// Commits open transactions on drop so partial runs keep their LOD data for resume.
 impl Drop for DhWriter {
     fn drop(&mut self) {
         let state = self.state.get_mut().unwrap_or_else(|p| p.into_inner());
         if let Some(conn) = state.conn.take() {
+            let _ = conn.execute_batch("COMMIT;");
             drop(conn);
-            let _ = remove_database(&self.staging);
         }
     }
 }

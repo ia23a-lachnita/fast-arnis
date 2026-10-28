@@ -182,14 +182,18 @@ pub struct ProgressTelemetry {
 /// and to the Tauri GUI window.
 pub fn emit_progress_telemetry(t: &ProgressTelemetry, overall_progress: f64) {
     if !is_running_with_gui() {
-        let width = 25;
-        let filled = if t.total > 0 {
-            (t.completed * width / t.total).min(width)
+        let overall_width = 18;
+        let overall_filled = ((overall_progress / 100.0 * overall_width as f64) as usize).min(overall_width);
+        let overall_bar = format!("[{}{}]", "=".repeat(overall_filled), " ".repeat(overall_width.saturating_sub(overall_filled)));
+
+        let stage_width = 18;
+        let stage_filled = if t.total > 0 {
+            (t.completed * stage_width / t.total).min(stage_width)
         } else {
             0
         };
-        let bar = format!("[{}{}]", "=".repeat(filled), " ".repeat(width.saturating_sub(filled)));
-        let pct = if t.total > 0 {
+        let stage_bar = format!("[{}{}]", "=".repeat(stage_filled), " ".repeat(stage_width.saturating_sub(stage_filled)));
+        let stage_pct = if t.total > 0 {
             (t.completed as f64 / t.total as f64 * 100.0).min(100.0)
         } else {
             0.0
@@ -214,15 +218,16 @@ pub fn emit_progress_telemetry(t: &ProgressTelemetry, overall_progress: f64) {
 
         use std::io::Write;
         print!(
-            "\r  [{}/{}] {}: {} {}/{} {} ({:.1}%) | {:.1} {}/s | {} | Disk: {}   ",
+            "\r  Total: {} {:>4.1}% | [{}/{}] {}: {} {}/{} ({:.1}%) | {:.1} {}/s | {} | Disk: {}   ",
+            overall_bar,
+            overall_progress,
             t.stage,
             t.total_stages,
             t.stage_name,
-            bar,
+            stage_bar,
             t.completed,
             t.total,
-            t.unit,
-            pct,
+            stage_pct,
             t.rate,
             t.unit,
             eta_str,
