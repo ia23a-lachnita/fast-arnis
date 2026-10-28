@@ -476,19 +476,66 @@ fn run_cli() {
     } else if let Some(world_dir) = one_world_paths.clone() {
         (world_dir, None)
     } else {
-        // Java: create a new world in the provided output directory
+        // Java: create a new world or resume existing world in the provided output directory
         let base_dir = args.path.clone().unwrap();
-        let world_path = match world_utils::create_new_world(&base_dir) {
-            Ok(path) => PathBuf::from(path),
-            Err(e) => {
-                eprintln!("{} {}", "Error:".red().bold(), e);
-                std::process::exit(1);
+        let world_path = if args.resume {
+            if let Some(ref name) = args.world_name {
+                let target = base_dir.join(name);
+                if target.exists() {
+                    println!(
+                        "Resuming existing world at: {}",
+                        target.display().to_string().bright_white().bold()
+                    );
+                    target
+                } else {
+                    PathBuf::from(
+                        world_utils::create_new_world_with_name(&base_dir, Some(name))
+                            .unwrap_or_else(|e| {
+                                eprintln!("{} {}", "Error:".red().bold(), e);
+                                std::process::exit(1);
+                            }),
+                    )
+                }
+            } else {
+                // If there is an existing "Arnis World *" in base_dir, resume the highest numbered one
+                let latest_existing = (1..=999)
+                    .map(|n| base_dir.join(format!("Arnis World {n}")))
+                    .take_while(|p| p.exists())
+                    .last();
+                if let Some(existing) = latest_existing {
+                    println!(
+                        "Resuming existing world at: {}",
+                        existing.display().to_string().bright_white().bold()
+                    );
+                    existing
+                } else {
+                    PathBuf::from(world_utils::create_new_world(&base_dir).unwrap_or_else(|e| {
+                        eprintln!("{} {}", "Error:".red().bold(), e);
+                        std::process::exit(1);
+                    }))
+                }
             }
+        } else if let Some(ref name) = args.world_name {
+            PathBuf::from(
+                world_utils::create_new_world_with_name(&base_dir, Some(name)).unwrap_or_else(|e| {
+                    eprintln!("{} {}", "Error:".red().bold(), e);
+                    std::process::exit(1);
+                }),
+            )
+        } else {
+            let world_path = match world_utils::create_new_world(&base_dir) {
+                Ok(path) => PathBuf::from(path),
+                Err(e) => {
+                    eprintln!("{} {}", "Error:".red().bold(), e);
+                    std::process::exit(1);
+                }
+            };
+            println!(
+                "Created new world at: {}",
+                world_path.display().to_string().bright_white().bold()
+            );
+            world_path
         };
-        println!(
-            "Created new world at: {}",
-            world_path.display().to_string().bright_white().bold()
-        );
         (world_path, None)
     };
 
