@@ -153,12 +153,14 @@ impl DhWriter {
              PRAGMA locking_mode = EXCLUSIVE;
              PRAGMA cache_size = -32000;", // Limit SQLite page cache to 32 MB to prevent OOM
         )?;
-        conn.execute_batch(SCHEMA)?;
-        for script in APPLIED_SCRIPTS {
-            let _ = conn.execute(
-                "INSERT OR IGNORE INTO Schema (ScriptName) VALUES (?1)",
-                [format!("sqlScripts/{script}")],
-            );
+        if !is_existing {
+            conn.execute_batch(SCHEMA)?;
+            for script in APPLIED_SCRIPTS {
+                let _ = conn.execute(
+                    "INSERT OR IGNORE INTO Schema (ScriptName) VALUES (?1)",
+                    [format!("sqlScripts/{script}")],
+                );
+            }
         }
         conn.execute_batch("BEGIN")?;
 
