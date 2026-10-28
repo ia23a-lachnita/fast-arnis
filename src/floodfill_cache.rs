@@ -140,6 +140,33 @@ impl CoordinateBitmap {
         }
     }
 
+    /// Merges another sparse bitmap into this one using bitwise OR across 64-word chunks.
+    pub fn merge(&mut self, other: CoordinateBitmap) {
+        for ((cx, cz), other_chunk) in other.chunks {
+            match self.chunks.entry((cx, cz)) {
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    let mut chunk_pop = 0usize;
+                    for &w in other_chunk.iter() {
+                        chunk_pop += w.count_ones() as usize;
+                    }
+                    self.count += chunk_pop;
+                    e.insert(other_chunk);
+                }
+                std::collections::hash_map::Entry::Occupied(mut e) => {
+                    let chunk = e.get_mut();
+                    for i in 0..64 {
+                        let before = chunk[i];
+                        let after = before | other_chunk[i];
+                        if before != after {
+                            self.count += (after.count_ones() - before.count_ones()) as usize;
+                            chunk[i] = after;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Checks if a coordinate is set.
     #[inline]
     pub fn contains(&self, x: i32, z: i32) -> bool {
@@ -364,6 +391,7 @@ struct WayFill {
 }
 
 /// Fills prepared per pass, so a pre-pass never holds every fill of the world at once.
+#[allow(dead_code)]
 const PREPASS_BATCH: usize = 512;
 /// Cells a pass that applies fills in order holds at once (8 bytes each).
 const PREPASS_BATCH_CELLS: usize = 1 << 22;
@@ -734,16 +762,28 @@ impl FloodFillCache {
                 _ => None,
             })
             .collect();
-        for batch in buildings.chunks(PREPASS_BATCH) {
-            let fills: Vec<Option<FloodFillResult>> = batch
-                .par_iter()
-                .map(|&id| self.transient_fill(id))
-                .collect();
-            for fill in fills.iter().flatten() {
-                for &(x, z) in fill.iter() {
-                    footprints.set(x, z);
+
+        // Process building batches in parallel across all CPU cores with thread-local
+        // sparse bitmaps, then merge via O(1) bitwise-OR block operations instead of
+        // bottlenecking the entire machine on single-threaded bit insertions.
+        let batch_size = 2048;
+        let partial_bitmaps: Vec<CoordinateBitmap> = buildings
+            .par_chunks(batch_size)
+            .map(|batch| {
+                let mut local = CoordinateBitmap::new(xzbbox);
+                for &id in batch {
+                    if let Some(fill) = self.transient_fill(id) {
+                        for &(x, z) in fill.iter() {
+                            local.set(x, z);
+                        }
+                    }
                 }
-            }
+                local
+            })
+            .collect();
+
+        for partial in partial_bitmaps {
+            footprints.merge(partial);
         }
 
         footprints

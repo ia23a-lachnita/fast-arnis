@@ -163,3 +163,95 @@ pub fn emit_show_in_folder(path: &str) {
         }
     }
 }
+
+/// Rich progress telemetry payload containing stage, rate, ETA, and disk metrics.
+#[derive(Clone, Debug)]
+pub struct ProgressTelemetry {
+    pub stage: u8,
+    pub total_stages: u8,
+    pub stage_name: &'static str,
+    pub completed: usize,
+    pub total: usize,
+    pub unit: &'static str,
+    pub rate: f64,
+    pub eta_secs: u64,
+    pub disk_mb: u64,
+}
+
+/// Emits real-time rich progress telemetry to CLI (in-place ANSI progress bar)
+/// and to the Tauri GUI window.
+pub fn emit_progress_telemetry(t: &ProgressTelemetry, overall_progress: f64) {
+    if !is_running_with_gui() {
+        let width = 25;
+        let filled = if t.total > 0 {
+            (t.completed * width / t.total).min(width)
+        } else {
+            0
+        };
+        let bar = format!("[{}{}]", "=".repeat(filled), " ".repeat(width.saturating_sub(filled)));
+        let pct = if t.total > 0 {
+            (t.completed as f64 / t.total as f64 * 100.0).min(100.0)
+        } else {
+            0.0
+        };
+
+        let hours = t.eta_secs / 3600;
+        let mins = (t.eta_secs % 3600) / 60;
+        let secs = t.eta_secs % 60;
+        let eta_str = if t.rate <= 0.001 || t.completed == 0 {
+            "ETA: calculating...".to_string()
+        } else if hours > 0 {
+            format!("ETA: {:02}h {:02}m", hours, mins)
+        } else {
+            format!("ETA: {:02}m {:02}s", mins, secs)
+        };
+
+        let disk_str = if t.disk_mb >= 1024 {
+            format!("{:.1} GB", t.disk_mb as f64 / 1024.0)
+        } else {
+            format!("{} MB", t.disk_mb)
+        };
+
+        use std::io::Write;
+        print!(
+            "\r  [{}/{}] {}: {} {}/{} {} ({:.1}%) | {:.1} {}/s | {} | Disk: {}   ",
+            t.stage,
+            t.total_stages,
+            t.stage_name,
+            bar,
+            t.completed,
+            t.total,
+            t.unit,
+            pct,
+            t.rate,
+            t.unit,
+            eta_str,
+            disk_str,
+        );
+        std::io::stdout().flush().ok();
+    }
+
+    if let Some(window) = get_main_window() {
+        let payload = json!({
+            "progress": clamp_progress(overall_progress),
+            "message": format!("{}: {}/{} {}", t.stage_name, t.completed, t.total, t.unit),
+            "streaming": true,
+            "stage": format!("{}/{}", t.stage, t.total_stages),
+            "stage_name": t.stage_name,
+            "completed": t.completed,
+            "total": t.total,
+            "unit": t.unit,
+            "rate": t.rate,
+            "eta_secs": t.eta_secs,
+            "disk_mb": t.disk_mb,
+        });
+        window.emit("progress-update", payload).ok();
+    }
+}
+
+/// Finalizes the in-place CLI progress line by printing a newline.
+pub fn finish_progress_telemetry() {
+    if !is_running_with_gui() {
+        println!();
+    }
+}

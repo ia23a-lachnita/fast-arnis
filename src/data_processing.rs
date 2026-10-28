@@ -1406,10 +1406,13 @@ pub fn generate_world_with_options(
     }
 
     // Auto-resume engine: audit existing world region files for progress recovery
+    let mut recovered_regions_count = 0usize;
+    let initial_tile_count = tiles.len();
     if args.resume {
         let region_dir = output_path.join("region");
         let resume_report = crate::resume::audit_existing_regions(&region_dir);
         if resume_report.recovered_regions_count > 0 {
+            recovered_regions_count = resume_report.recovered_regions_count;
             println!(
                 "  [Resume Engine] Detected existing world progress! Validated {} existing regions ({} corrupted discarded).",
                 resume_report.recovered_regions_count,
@@ -1434,6 +1437,7 @@ pub fn generate_world_with_options(
             }
         }
     }
+    let total_workload_tiles = initial_tile_count.max(1);
 
     // Tile editors are created as JavaAnvil (WorldEditor::new), so their
     // format-dependent block-entity schema (banners) only matches Java output.
@@ -1571,7 +1575,7 @@ pub fn generate_world_with_options(
         // Counted per tile, not per element: measured per-tile cost is near flat
         // (the area work dominates), so tile count tracks time despite LPT order.
         let mut tiles_merged = 0usize;
-        let mut last_emitted_pct = 20.0_f64;
+        let mut last_telemetry_time = std::time::Instant::now();
         // Placement-side ticks so the bar moves before the first tile merges.
         let tiles_placed = std::sync::atomic::AtomicUsize::new(0);
         // Phase 1: build one tile on its own editor.
@@ -1931,21 +1935,34 @@ pub fn generate_world_with_options(
                             tunnel_cells.extend(tile_tunnel_cells);
                         }
 
-                        // Step 20%->70% per merged tile, throttled to whole-percent steps.
+                        // Step 20%->70% per merged tile with real-time ETA and CLI/GUI telemetry
                         tiles_merged += 1;
                         eta_tracker.inc();
-                        let pct = 20.0 + (tiles_merged as f64 / total_tiles as f64) * 50.0;
-                        if pct - last_emitted_pct >= 1.0 || tiles_merged == total_tiles {
-                            let eta_info = eta_tracker.format_summary();
-                            if !crate::progress::is_running_with_gui() {
-                                println!("  Generating area... {eta_info}");
-                            }
-                            emit_gui_progress_update_ex(
-                                pct,
-                                &format!("Generating area... {eta_info}"),
-                                eviction_active,
-                            );
-                            last_emitted_pct = pct;
+                        let now = std::time::Instant::now();
+                        let should_emit = tiles_merged == 1
+                            || tiles_merged == total_tiles
+                            || tiles_merged % 10 == 0
+                            || now.duration_since(last_telemetry_time) >= std::time::Duration::from_millis(500);
+
+                        if should_emit {
+                            last_telemetry_time = now;
+                            let (_, rate, remaining) = eta_tracker.sample();
+                            let current_completed = recovered_regions_count + tiles_merged;
+                            let overall_pct = 20.0 + (current_completed as f64 / total_workload_tiles as f64) * 50.0;
+                            let disk_mb = (current_completed as u64) * 53 / 10;
+
+                            let telemetry = crate::progress::ProgressTelemetry {
+                                stage: 5,
+                                total_stages: 7,
+                                stage_name: "Generating area",
+                                completed: current_completed,
+                                total: total_workload_tiles,
+                                unit: "tiles",
+                                rate,
+                                eta_secs: remaining.as_secs(),
+                                disk_mb,
+                            };
+                            crate::progress::emit_progress_telemetry(&telemetry, overall_pct);
                         }
                         // Shaping is reported on its own line.
                         merge_dur += merge_start
@@ -1962,6 +1979,7 @@ pub fn generate_world_with_options(
             if merged.is_err() {
                 abort_tile_pipeline(&stop, &gate);
             }
+            crate::progress::finish_progress_telemetry();
             merged
         })?;
         let place_dur = place_start.elapsed();

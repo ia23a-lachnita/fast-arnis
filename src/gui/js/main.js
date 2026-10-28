@@ -1036,8 +1036,16 @@ function resetProgressUi(message) {
   const bar = document.getElementById("progress-bar");
   const info = document.getElementById("progress-info");
   const detail = document.getElementById("progress-detail");
+  const stageBadge = document.getElementById("progress-stage-badge");
+  const unitsMetric = document.getElementById("progress-units-metric");
+  const speedMetric = document.getElementById("progress-speed-metric");
+  const diskMetric = document.getElementById("progress-disk-metric");
   if (bar) bar.style.width = "0%";
   if (detail) detail.textContent = "0%";
+  if (stageBadge) stageBadge.textContent = "Stage 1/7";
+  if (unitsMetric) unitsMetric.textContent = "0 / 0 tiles";
+  if (speedMetric) speedMetric.textContent = "0.0 tiles/s";
+  if (diskMetric) diskMetric.textContent = "Disk: 0 MB";
   if (info) {
     info.textContent = message;
     info.style.color = "#ececec";
@@ -1052,7 +1060,27 @@ function setupProgressListener() {
   const progressDetail = document.getElementById("progress-detail");
 
   window.__TAURI__.event.listen("progress-update", (event) => {
-    const { progress, message, streaming } = event.payload;
+    const { progress, message, streaming, stage, stage_name, completed, total, unit, rate, eta_secs, disk_mb } = event.payload;
+
+    const stageBadge = document.getElementById("progress-stage-badge");
+    const unitsMetric = document.getElementById("progress-units-metric");
+    const speedMetric = document.getElementById("progress-speed-metric");
+    const diskMetric = document.getElementById("progress-disk-metric");
+
+    if (stage && stageBadge) {
+      stageBadge.textContent = `Stage ${stage}`;
+    }
+    if (completed != null && total != null && unitsMetric) {
+      unitsMetric.textContent = `${completed.toLocaleString()} / ${total.toLocaleString()} ${unit || 'tiles'}`;
+    }
+    if (rate != null && speedMetric) {
+      speedMetric.textContent = `${rate.toFixed(1)} ${unit || 'tiles'}/s`;
+    }
+    if (disk_mb != null && diskMetric) {
+      diskMetric.textContent = disk_mb >= 1024 
+        ? `Disk: ${(disk_mb / 1024).toFixed(1)} GB`
+        : `Disk: ${disk_mb} MB`;
+    }
 
     if (progress != -1) {
       progressBar.style.width = `${progress}%`;

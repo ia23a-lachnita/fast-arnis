@@ -102,6 +102,8 @@ mod progress {
     pub fn emit_gui_progress_update_ex(_progress: f64, _message: &str, _streaming: bool) {}
     pub fn emit_map_preview_ready() {}
     pub fn emit_show_in_folder(_path: &str) {}
+    pub fn emit_progress_telemetry(_t: &crate::progress::ProgressTelemetry, _overall_progress: f64) {}
+    pub fn finish_progress_telemetry() {}
     pub fn is_running_with_gui() -> bool {
         false
     }
